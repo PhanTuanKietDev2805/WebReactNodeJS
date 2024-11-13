@@ -1,0 +1,199 @@
+version: "3"
+services:
+  nosql-db:
+    image: mongo:jammy
+    ports:
+      - "27017:27017"
+    container_name: nosql-db
+    command: mongod --replSet rs0
+    networks:
+      - my-db
+    volumes:
+      - ./db/:/data/db
+
+  nosql-db-secondary:
+    image: mongo:jammy
+    ports:
+      - "27018:27017"
+    container_name: nosql-db-secondary
+    command: mongod --replSet rs0
+    networks:
+      - my-db
+    volumes:
+      - ./db-secondary/:/data/db-secondary
+  mongoinit:
+    container_name: mongoinit
+    image: mongo:jammy
+    restart: on-failure
+    networks:
+      - my-db
+    depends_on:
+      - nosql-db
+      - nosql-db-secondary
+    command: >
+      mongosh --host nosql-db:27017 --eval  'config = { 
+        "_id" : "rs0",
+        "protocolVersion": 1,
+        "version": 1,
+        "members" : [
+          {
+            "_id" : 0,
+            "host" : "nosql-db:27017",
+            "priority": 3
+          },
+          {
+            "_id" : 1,
+            "host" : "nosql-db-secondary:27017",
+            "priority": 1
+          }
+        ],settings: {chainingAllowed: true} }; 
+        rs.initiate(config); 
+        rs.reconfig(config, { force: true });
+        rs.slaveOk();
+        db.getMongo().setReadPref('nearest');
+        db.getMongo().setSlaveOk();'
+
+  rabbitmq:
+    image: rabbitmq:alpine
+    container_name: rabbitmq
+    networks:
+      - my-db
+    ports:
+      - "5672:5672"
+
+  products:
+    build:
+      dockerfile: Dockerfile
+      context: ./products
+    container_name: products
+    ports:
+      - "8002:8002"
+    restart: always
+    networks:
+      - my-db
+    depends_on:
+      - "nosql-db"
+      - "rabbitmq"
+      - "nosql-db-secondary"
+      - "minio"
+      - "redis"
+      - "customer"
+    volumes:
+      - .:/app
+      - /app/products/node_modules
+
+    env_file:
+      - ./products/.env.dev
+  shopping:
+    build:
+      dockerfile: Dockerfile
+      context: ./shopping
+    container_name: shopping
+    ports:
+      - "8003:8003"
+    networks:
+      - my-db
+    restart: always
+    depends_on:
+      - "nosql-db"
+      - "rabbitmq"
+      - "nosql-db-secondary"
+      - "redis"
+      - "customer"
+    volumes:
+      - .:/app
+      - /app/shopping/node_modules
+    env_file:
+      - ./shopping/.env.dev
+  customer:
+    build:
+      dockerfile: Dockerfile
+      context: ./customer
+    container_name: customer
+    ports:
+      - "8001:8001"
+    networks:
+      - my-db
+    restart: always
+    depends_on:
+      - "nosql-db"
+      - "rabbitmq"
+      - "nosql-db-secondary"
+      - "redis"
+    volumes:
+      - .:/app/
+      - /app/customer/node_modules
+    env_file:
+      - ./customer/.env.dev
+
+  gateway:
+    build:
+      dockerfile: Dockerfile
+      context: ./gateway
+    container_name: gateway
+    ports:
+      - "8000:8000"
+    restart: always
+    networks:
+      - my-db
+    depends_on:
+      - "products"
+      - "customer"
+      - "shopping"
+    volumes:
+      - .:/app/
+      - /app/gateway/node_modules
+    env_file:
+      - ./gateway/.env.dev
+  nginx-proxy:
+    build:
+      dockerfile: Dockerfile
+      context: ./proxy
+    networks:
+      - my-db
+    depends_on:
+      - products
+      - shopping
+      - customer
+    ports:
+      - 80:80
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./storage:/data
+    networks:
+      - my-db
+    environment:
+      MINIO_ROOT_USER: admin1234
+      MINIO_ROOT_PASSWORD: 123456789
+    command: server --console-address ":9001" /data
+
+  redis:
+    image: redis:latest
+    container_name: redis
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+    networks:
+      - my-db
+    volumes:
+      - .docker/data/redis:/data
+    ports:
+      - 6379:6379
+  redis-commander:
+    container_name: redis-commander
+    image: rediscommander/redis-commander
+    networks:
+      - my-db
+    restart: always
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+networks:
+  my-db:
+    driver: bridge
